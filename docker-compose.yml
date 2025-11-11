@@ -1,84 +1,124 @@
-version: "3.9"
-
 services:
-  app:
-    image: python:3.11-slim
-    container_name: app
-    working_dir: /app
-    volumes:
-      - ./app:/app:rw
-    # Install deps at container start & run FastAPI with Uvicorn
-    command: >
-      bash -lc "pip install --no-cache-dir -r requirements.txt &&
-                uvicorn main:app --host 0.0.0.0 --port 8000"
-    environment:
-      # Postgres
-      DATABASE_URL: postgresql://appuser:appsecret@postgres:5432/shop
-      # Neo4j
-      NEO4J_URI: bolt://neo4j:7687
-      NEO4J_USER: neo4j
-      NEO4J_PASSWORD: neo4jpass
-    ports:
-      - "8000:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      neo4j:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
-
-  neo4j:
-    image: neo4j:5.20
-    container_name: neo4j
-    ports:
-      - "7474:7474"   # HTTP UI
-      - "7687:7687"   # Bolt
-    environment:
-      NEO4J_AUTH: neo4j/neo4jpass
-      # Install plugins (Neo4j 5.x)
-      NEO4J_PLUGINS: '["apoc", "graph-data-science"]'
-      # Required to run GDS
-      NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
-      # Allow APOC file import/export
-      NEO4J_dbms_security_procedures_unrestricted: "apoc.* , gds.*"
-      NEO4J_dbms_security_procedures_allowlist: "apoc.* , gds.*"
-      NEO4J_apoc_export_file_enabled: "true"
-      NEO4J_apoc_import_file_enabled: "true"
-      NEO4J_server_memory_heap_initial__size: 1G
-      NEO4J_server_memory_heap_max__size: 2G
-    volumes:
-      # Persist DB, logs, and plugins
-      - neo4j_data:/var/lib/neo4j/data
-      - neo4j_logs:/var/lib/neo4j/logs
-      - neo4j_plugins:/var/lib/neo4j/plugins
-      # **Easy local import**: drop CSV/JSON into ./neo4j/import on your host
-      - ./neo4j/import:/var/lib/neo4j/import:rw
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-
   postgres:
     image: postgres:16
     container_name: postgres
     environment:
       POSTGRES_DB: shop
-      POSTGRES_USER: appuser
+      POSTGRES_USER: app
       POSTGRES_PASSWORD: appsecret
     ports:
       - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U appuser -d shop -h localhost"]
+      test: ["CMD-SHELL", "pg_isready -U app -d shop -h localhost"]
       interval: 10s
       timeout: 5s
       retries: 20
+
+  # Run only when you explicitly seed (profile: seed) and skip if already initialized.
+  seeder:
+    image: postgres:16
+    profiles: ["seed"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./postgres/init:/seed:ro
+    entrypoint: >
+      bash -lc "
+        set -euo pipefail;
+        echo '⏳ Checking if DB needs seeding…';
+        if PGPASSWORD=appsecret psql -h postgres -U app -d shop -tAc
+           \"SELECT 1 FROM information_schema.tables WHERE table_name='customers'\" | grep -q 1; then
+          echo '✅ DB already initialized — skipping seed.';
+        else
+          echo '⏳ Seeding Postgres…';
+          PGPASSWORD=appsecret psql -h postgres -U app -d shop -v ON_ERROR_STOP=1 -f /seed/01_schema.sql;
+          PGPASSWORD=appsecret psql -h postgres -U app -d shop -v ON_ERROR_STOP=1 -f /seed/02_seed.sql;
+          echo '✅ Seed done.';
+        fi
+      "
+    environment:
+      PGPASSWORD: appsecret
+    restart: "no"
+
+  neo4j:
+    image: neo4j:5.20
+    container_name: neo4j
+    environment:
+      NEO4J_AUTH: neo4j/password
+      NEO4J_PLUGINS: '["apoc","graph-data-science"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*,gds.*"
+      NEO4J_server_memory_heap_initial__size: 1G
+      NEO4J_server_memory_heap_max__size: 2G
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_plugins:/plugins
+      - ./neo4j/import:/import
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u neo4j -p password 'RETURN 1' >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+
+  app:
+    image: python:3.11-slim
+    container_name: app
+    working_dir: /app
+    command: >
+      bash -lc "pip install --no-cache-dir -r requirements.txt &&
+                uvicorn main:app --host 0.0.0.0 --port 8000"
+    volumes:
+      - ./app:/app:rw
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  # End-to-end check service (runs health, psql sanity, and the ETL)
+  checks:
+    image: python:3.11-slim
+    depends_on:
+      app:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    working_dir: /work
+    volumes:
+      - ./app:/work/app:ro
+    entrypoint: >
+      bash -lc "
+        set -euo pipefail &&
+        apt-get update &&
+        apt-get install -y --no-install-recommends curl postgresql-client &&
+        pip install --no-cache-dir -r /work/app/requirements.txt &&
+        echo '› Checking FastAPI health…' &&
+        curl -fsS http://app:8000/health && echo && echo '✔ FastAPI health OK' &&
+        echo &&
+        echo '› Postgres: SELECT * FROM orders LIMIT 5;' &&
+        PGPASSWORD=appsecret psql -h postgres -U app -d shop -c 'SELECT * FROM orders LIMIT 5;' &&
+        echo '✔ Orders query OK' &&
+        echo &&
+        echo '› Postgres: SELECT now();' &&
+        PGPASSWORD=appsecret psql -h postgres -U app -d shop -c 'SELECT now();' &&
+        echo '✔ now() query OK' &&
+        echo &&
+        echo '› ETL: python /work/app/etl.py' &&
+        python /work/app/etl.py | tee /tmp/etl.log &&
+        tail -n 1 /tmp/etl.log | grep -q 'ETL done.' &&
+        echo '✔ ETL output OK (ETL done.)'
+      "
 
 volumes:
   pg_data:
