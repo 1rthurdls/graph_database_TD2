@@ -10,7 +10,8 @@ A reproducible setup for a small graph/database assignment that uses:
 ##  What’s inside
 
 - `app/` — Python application code (scripts or API that interacts with the database).  
-- `postgres/init/` — SQL files that initialize and seed Postgres automatically on first start.  
+- `postgres/init/` — SQL files that initialize and seed Postgres automatically on first start.
+- `submission/` — The screenshots and short note files required to validate the lab.
 - `docker-compose.yml` — Orchestrates the stack (database and, if defined, the app).
 
 ---
