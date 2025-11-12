@@ -1,0 +1,6 @@
+Which recommendation strategy you can implement ?
+I can implement collaborative filtering for both user and item based on the money spent on similar items or based on person who bought similar items in the past .
+
+What’s improvements you’d make for transforming this mini project into production ready code ?
+Create an authentication system for the use of the api,automate the ETL pipeline (e.g., via Airflow or Prefect) to continuously synchronize data between Postgres and Neo4j.
+
