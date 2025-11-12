@@ -29,3 +29,17 @@ A reproducible setup for a small graph/database assignment that uses:
 ```bash
 git clone https://github.com/1rthurdls/graph_database_TD2.git
 cd graph_database_TD2
+```
+
+2) **Start the services**
+```bash
+docker compose up -d
+```
+3) **Run the Python app**
+```bash
+docker compose up --build app
+```
+4) **Stop & clean up**
+```bash
+docker compose down -v
+```
